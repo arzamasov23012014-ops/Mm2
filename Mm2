@@ -1,0 +1,1218 @@
+-- ============================================================
+-- SAKURA MOBILE V6 (Murder Mystery 2)
+-- Silent Aim (как в Pulse) / ESP / Auto Grab / Fast Run
+-- ============================================================
+local env = (getgenv and getgenv()) or _G
+if env.SakuraMobileUnload then
+    pcall(env.SakuraMobileUnload)
+    env.SakuraMobileUnload = nil
+    task.wait(0.3)
+end
+
+local Players    = game:GetService("Players")
+local RS         = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local WS         = game:GetService("Workspace")
+local TS         = game:GetService("TweenService")
+local Http       = game:GetService("HttpService")
+local Debris     = game:GetService("Debris")
+local RepStorage = game:GetService("ReplicatedStorage")
+local player     = Players.LocalPlayer
+if not player then warn("Нет LocalPlayer") return end
+local Camera     = WS.CurrentCamera
+local VERSION    = 6
+local Running    = true
+local S = {conns = {}, tasks = {}, guis = {}, esp = {}, roles = {}, themed = {}, refreshers = {}}
+
+-- ============ НАСТРОЙКИ ============
+local DEFAULTS = {
+    RoleESP = true, ShowName = true, ShowDistance = true, HideInnocent = false, PreciseRoles = true,
+    GunESP = true, ESPLines = false, MurdererAlert = false, AlertRange = 40,
+    FastRun = false, FastRunSpeed = 28,
+    AutoGrab = false, GrabTeleport = true, GrabReturn = true, GrabSkipMurderer = true, GrabNotify = true, GrabRange = 0,
+    SilentAim = true,
+    SilentAimManual = false,
+    SilentAimPredict = true,
+    SilentAimFOV = 200,
+    SilentAimDelay = 0.3,
+    Mode = "sakura", MenuAlpha = 0.06, MenuScale = 1, MenuFX = true,
+}
+local Config = {}
+for k, v in pairs(DEFAULTS) do Config[k] = v end
+
+local FILE = "SakuraMobile_MM2.json"
+local canFile = (writefile ~= nil and readfile ~= nil and isfile ~= nil)
+
+local function Save()
+    if not canFile then return end
+    pcall(function() writefile(FILE, Http:JSONEncode(Config)) end)
+end
+local saveQueued = false
+local function MarkDirty()
+    if saveQueued or not Running then return end
+    saveQueued = true
+    task.delay(2, function()
+        saveQueued = false
+        if Running then Save() end
+    end)
+end
+if canFile then
+    pcall(function()
+        if isfile(FILE) then
+            local d = Http:JSONDecode(readfile(FILE))
+            for k, v in pairs(d) do
+                if DEFAULTS[k] ~= nil and type(v) == type(DEFAULTS[k]) then Config[k] = v end
+            end
+        end
+    end)
+end
+
+-- ============ УТИЛИТЫ ============
+local function New(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+local function Round(o, r) return New("UICorner", {CornerRadius = UDim.new(0, r)}, o) end
+local function Conn(c) S.conns[#S.conns + 1] = c return c end
+
+local THEMES = {
+    sakura = {accent = Color3.fromRGB(255, 102, 178), bg = Color3.fromRGB(18, 5, 32),
+        logoBg = Color3.new(1, 1, 1), logoText = Color3.fromRGB(255, 102, 178), logoStroke = Color3.fromRGB(255, 190, 220)},
+    space = {accent = Color3.fromRGB(150, 90, 255), bg = Color3.fromRGB(4, 2, 12),
+        logoBg = Color3.new(0, 0, 0), logoText = Color3.fromRGB(165, 105, 255), logoStroke = Color3.fromRGB(110, 60, 200)},
+}
+local function T() return THEMES[Config.Mode] or THEMES.sakura end
+
+local toastLbl, toastStroke, toastToken = nil, nil, 0
+local function Toast(text, dur)
+    if not Running then return end
+    pcall(function()
+        if not toastLbl or not toastLbl.Parent then
+            local g = New("ScreenGui", {Name = "SakuraMobileToast", ResetOnSpawn = false, IgnoreGuiInset = true,
+                DisplayOrder = 1000}, player:WaitForChild("PlayerGui"))
+            S.guis[#S.guis + 1] = g
+            toastLbl = New("TextLabel", {AnchorPoint = Vector2.new(.5, 0), Position = UDim2.new(.5, 0, 0, 8),
+                Size = UDim2.new(0, 0, 0, 28), AutomaticSize = Enum.AutomaticSize.XY,
+                BackgroundColor3 = Color3.fromRGB(14, 4, 26), BackgroundTransparency = 0.15,
+                TextColor3 = Color3.new(1, 1, 1), TextSize = 13, Font = Enum.Font.GothamBold,
+                BorderSizePixel = 0, Visible = false}, g)
+            Round(toastLbl, 10)
+            New("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14)}, toastLbl)
+            toastStroke = New("UIStroke", {Thickness = 1.5, Transparency = 0.2}, toastLbl)
+        end
+        toastStroke.Color = T().accent
+        toastToken = toastToken + 1
+        local my = toastToken
+        toastLbl.Text = text
+        toastLbl.Position = UDim2.new(.5, 0, 0, -24)
+        toastLbl.Visible = true
+        TS:Create(toastLbl, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+            {Position = UDim2.new(.5, 0, 0, 8)}):Play()
+        task.delay(dur or 2, function()
+            if my == toastToken and toastLbl then toastLbl.Visible = false end
+        end)
+    end)
+end
+
+local function Beep()
+    pcall(function()
+        local snd = New("Sound", {SoundId = "rbxasset://sounds/electronicpingshort.wav", Volume = 1}, WS)
+        snd:Play()
+        Debris:AddItem(snd, 2)
+    end)
+end
+
+local function Task(name, interval, fn)
+    S.tasks[name] = {interval = interval, last = 0, fn = fn, fails = 0}
+end
+Conn(RS.Heartbeat:Connect(function(dt)
+    local now = tick()
+    for name, t in pairs(S.tasks) do
+        if now - t.last >= t.interval then
+            t.last = now
+            local ok, err = pcall(t.fn, dt)
+            if ok then
+                t.fails = 0
+            else
+                t.fails = t.fails + 1
+                warn("🌸 [" .. name .. "] " .. tostring(err))
+                if t.fails >= 8 then
+                    S.tasks[name] = nil
+                    Toast("⚠️ Задача «" .. name .. "» остановлена из-за ошибок")
+                end
+            end
+        end
+    end
+end))
+
+-- ============ ПЕРСОНАЖ ============
+local char, hum, root
+local origSpeed = 16
+local function BindChar(c)
+    char = c
+    hum = c:WaitForChild("Humanoid", 8)
+    root = c:WaitForChild("HumanoidRootPart", 8)
+    if hum then origSpeed = hum.WalkSpeed end
+end
+if player.Character then
+    BindChar(player.Character)
+else
+    BindChar(player.CharacterAdded:Wait())
+end
+Conn(player.CharacterAdded:Connect(BindChar))
+
+-- ============ РОЛИ ============
+local ROLE_COLORS = {
+    Murderer = Color3.fromRGB(255, 50, 50),
+    Sheriff = Color3.fromRGB(70, 150, 255),
+    Innocent = Color3.fromRGB(70, 255, 110),
+}
+local ROLE_RU = {Murderer = "Убийца", Sheriff = "Шериф", Innocent = "Мирный"}
+
+local function IsAlive(plr)
+    local c = plr and plr.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    return h ~= nil and h.Health > 0
+end
+
+local function HasTool(plr, name)
+    local c = plr.Character
+    local bp = plr:FindFirstChild("Backpack")
+    return (c and c:FindFirstChild(name)) or (bp and bp:FindFirstChild(name)) or nil
+end
+
+local function RoleByTools(plr)
+    if HasTool(plr, "Knife") then return "Murderer" end
+    if HasTool(plr, "Gun") then return "Sheriff" end
+    return "Innocent"
+end
+
+local function GetRole(plr)
+    local r = S.roles[plr.Name]
+    if Config.PreciseRoles and r then return r end
+    return RoleByTools(plr)
+end
+
+local function MyRole() return GetRole(player) end
+
+local function RefreshRoles()
+    local ok, data = pcall(function()
+        return RepStorage.Remotes.Extras.GetPlayerData:InvokeServer()
+    end)
+    if ok and type(data) == "table" then
+        local new = {}
+        for name, info in pairs(data) do
+            if type(info) == "table" and type(info.Role) == "string" then
+                local role = info.Role
+                if role == "Hero" then role = "Sheriff" end
+                if ROLE_COLORS[role] then new[name] = role end
+            end
+        end
+        S.roles = new
+        S.remoteOK = true
+    else
+        S.remoteOK = false
+    end
+end
+Task("roles", 3, function()
+    if S.refreshing or not Config.PreciseRoles then return end
+    S.refreshing = true
+    task.spawn(function()
+        RefreshRoles()
+        S.refreshing = false
+    end)
+end)
+
+-- ============ ПИСТОЛЕТ ============
+local function FindGunDrop()
+    if S.gunDrop and S.gunDrop.Parent then return S.gunDrop end
+    if tick() - (S.lastSearch or 0) < 1 then return nil end
+    S.lastSearch = tick()
+    S.gunDrop = WS:FindFirstChild("GunDrop", true)
+    return S.gunDrop
+end
+
+Conn(WS.DescendantAdded:Connect(function(o)
+    if o.Name == "GunDrop" and o:IsA("BasePart") then
+        S.gunDrop = o
+        S.dropTime = tick()
+        Toast("🔫 Пистолет упал!", 3)
+    end
+end))
+
+local function HasGun()
+    return ((char and char:FindFirstChild("Gun")) or (player:FindFirstChild("Backpack") and player.Backpack:FindFirstChild("Gun"))) ~= nil
+end
+
+local grabbing, lastGrab = false, 0
+local function GrabGun(drop, manual)
+    if grabbing or not root or not drop or not drop.Parent then return end
+    grabbing = true
+    lastGrab = tick()
+    task.spawn(function()
+        local origCF = root.CFrame
+        local picked = false
+        if firetouchinterest then
+            pcall(function()
+                local touchPart = char:FindFirstChild("LeftFoot") or char:FindFirstChild("Left Leg") or root
+                firetouchinterest(touchPart, drop, 0)
+                task.wait(0.05)
+                firetouchinterest(touchPart, drop, 1)
+            end)
+            task.wait(0.2)
+            picked = HasGun() or not drop.Parent
+        end
+        if not picked and (Config.GrabTeleport or manual) and drop.Parent and root then
+            root.CFrame = drop.CFrame + Vector3.new(0, 2.5, 0)
+            local t0 = tick()
+            repeat
+                task.wait(0.05)
+                picked = HasGun() or not drop.Parent
+            until picked or tick() - t0 > 1.5
+            if Config.GrabReturn and root then root.CFrame = origCF end
+        end
+        if picked and (Config.GrabNotify or manual) then Toast("✅ Пистолет подобран") end
+        grabbing = false
+    end)
+end
+
+Task("grab", 0.2, function()
+    if not Config.AutoGrab or grabbing or not root or not hum or hum.Health <= 0 then return end
+    if tick() - lastGrab < 0.8 then return end
+    local drop = FindGunDrop()
+    if not drop or not drop.Parent or HasGun() then return end
+    if Config.GrabSkipMurderer and MyRole() == "Murderer" then return end
+    if Config.GrabRange > 0 and (drop.Position - root.Position).Magnitude > Config.GrabRange then return end
+    GrabGun(drop, false)
+end)
+
+-- ============ ESP ============
+local function RemoveESP(plr)
+    local d = S.esp[plr]
+    if d then
+        pcall(function() d.hl:Destroy() end)
+        pcall(function() d.gui:Destroy() end)
+        S.esp[plr] = nil
+    end
+end
+
+local function MakeESP(plr)
+    local c = plr.Character
+    local head = c and c:FindFirstChild("Head")
+    if not head or not c:FindFirstChildOfClass("Humanoid") then return end
+    local d = S.esp[plr]
+    if d and d.char == c then return end
+    RemoveESP(plr)
+    local hl = New("Highlight", {Name = "SakHL", Adornee = c, FillTransparency = 0.7, OutlineTransparency = 0,
+        DepthMode = Enum.HighlightDepthMode.AlwaysOnTop, Enabled = false}, c)
+    local gui = New("BillboardGui", {Name = "SakGUI", Size = UDim2.new(0, 170, 0, 30), Adornee = head,
+        AlwaysOnTop = true, StudsOffset = Vector3.new(0, 2.6, 0), Enabled = false}, c)
+    local lbl = New("TextLabel", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 12, Font = Enum.Font.GothamBold, TextStrokeColor3 = Color3.new(0, 0, 0), TextStrokeTransparency = 0.3,
+        Text = ""}, gui)
+    S.esp[plr] = {hl = hl, gui = gui, lbl = lbl, char = c}
+end
+
+local function ClearESP()
+    for plr in pairs(S.esp) do RemoveESP(plr) end
+    if S.gunHL then pcall(function() S.gunHL:Destroy() end) S.gunHL = nil end
+    if S.gunGui then pcall(function() S.gunGui:Destroy() end) S.gunGui = nil end
+end
+
+local function UpdateGunESP()
+    local drop = Config.GunESP and FindGunDrop() or nil
+    if drop and drop.Parent then
+        if not S.gunHL or S.gunHL.Adornee ~= drop then
+            if S.gunHL then pcall(function() S.gunHL:Destroy() end) end
+            if S.gunGui then pcall(function() S.gunGui:Destroy() end) end
+            S.gunHL = New("Highlight", {Name = "SakGunHL", Adornee = drop, FillColor = Color3.fromRGB(255, 215, 0),
+                OutlineColor = Color3.fromRGB(255, 215, 0), FillTransparency = 0.4,
+                DepthMode = Enum.HighlightDepthMode.AlwaysOnTop}, drop)
+            S.gunGui = New("BillboardGui", {Name = "SakGunGUI", Size = UDim2.new(0, 160, 0, 26), Adornee = drop,
+                AlwaysOnTop = true, StudsOffset = Vector3.new(0, 2, 0)}, drop)
+            S.gunLbl = New("TextLabel", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+                TextColor3 = Color3.fromRGB(255, 215, 0), TextSize = 13, Font = Enum.Font.GothamBlack,
+                TextStrokeTransparency = 0.3, Text = "🔫 ПИСТОЛЕТ"}, S.gunGui)
+        end
+        local dist = root and math.floor((drop.Position - root.Position).Magnitude) or 0
+        S.gunLbl.Text = "🔫 ПИСТОЛЕТ " .. dist .. "m"
+    elseif S.gunHL then
+        pcall(function() S.gunHL:Destroy() end)
+        pcall(function() S.gunGui:Destroy() end)
+        S.gunHL, S.gunGui = nil, nil
+    end
+end
+
+Task("esp", 0.1, function()
+    UpdateGunESP()
+    for plr in pairs(S.esp) do
+        if not plr.Parent then RemoveESP(plr) end
+    end
+    if not Config.RoleESP then
+        for _, d in pairs(S.esp) do d.hl.Enabled = false d.gui.Enabled = false end
+        return
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and plr.Character then MakeESP(plr) end
+    end
+    for plr, d in pairs(S.esp) do
+        local c = plr.Character
+        local head = c and c:FindFirstChild("Head")
+        if not head or d.char ~= c then
+            RemoveESP(plr)
+        else
+            local role = GetRole(plr)
+            local show = IsAlive(plr) and not (Config.HideInnocent and role == "Innocent")
+            d.hl.Enabled = show
+            d.gui.Enabled = show
+            if show then
+                local color = ROLE_COLORS[role] or Color3.new(1, 1, 1)
+                d.hl.FillColor = color
+                d.hl.OutlineColor = color
+                local txt = ""
+                if Config.ShowName then txt = plr.Name .. " " end
+                txt = txt .. "[" .. (ROLE_RU[role] or role) .. "]"
+                if Config.ShowDistance and root then
+                    txt = txt .. " " .. math.floor((head.Position - root.Position).Magnitude) .. "m"
+                end
+                d.lbl.Text = txt
+                d.lbl.TextColor3 = color
+            end
+        end
+    end
+end)
+Conn(Players.PlayerRemoving:Connect(RemoveESP))
+
+-- ============ ЛИНИИ ============
+local function SetLine(fr, a, b)
+    local v = b - a
+    fr.Size = UDim2.new(0, v.Magnitude, 0, 2)
+    fr.Position = UDim2.new(0, (a.X + b.X) / 2, 0, (a.Y + b.Y) / 2)
+    fr.Rotation = math.deg(math.atan2(v.Y, v.X))
+    fr.Visible = true
+end
+local lineFrames = {}
+Task("lines", 0, function()
+    if not Config.ESPLines then
+        for _, f in ipairs(lineFrames) do f.Visible = false end
+        return
+    end
+    if not S.linesGui or not S.linesGui.Parent then
+        S.linesGui = New("ScreenGui", {Name = "SakuraMobileLines", ResetOnSpawn = false, IgnoreGuiInset = true,
+            DisplayOrder = -1}, player:WaitForChild("PlayerGui"))
+        S.guis[#S.guis + 1] = S.linesGui
+        lineFrames = {}
+        for i = 1, 4 do
+            lineFrames[i] = New("Frame", {AnchorPoint = Vector2.new(.5, .5), BorderSizePixel = 0,
+                BackgroundTransparency = 0.2, Visible = false}, S.linesGui)
+        end
+    end
+    local vp = Camera.ViewportSize
+    local origin = Vector2.new(vp.X / 2, vp.Y)
+    local n = 0
+    local function add(pos, color)
+        n = n + 1
+        local fr = lineFrames[n]
+        if not fr then return end
+        local p = Camera:WorldToViewportPoint(pos)
+        local pt = Vector2.new(p.X, p.Y)
+        if p.Z < 0 then pt = Vector2.new(vp.X - p.X, vp.Y - p.Y) end
+        fr.BackgroundColor3 = color
+        SetLine(fr, origin, pt)
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and IsAlive(plr) then
+            local role = GetRole(plr)
+            local r = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            if r and (role == "Murderer" or role == "Sheriff") then add(r.Position, ROLE_COLORS[role]) end
+        end
+    end
+    local drop = FindGunDrop()
+    if drop and drop.Parent then add(drop.Position, Color3.fromRGB(255, 215, 0)) end
+    for i = n + 1, #lineFrames do lineFrames[i].Visible = false end
+end)
+
+-- ============ ПРЕДУПРЕЖДЕНИЕ ============
+Task("alert", 0.3, function()
+    if not Config.MurdererAlert or not root or MyRole() == "Murderer" then S.alerted = false return end
+    local near = false
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and IsAlive(plr) and GetRole(plr) == "Murderer" then
+            local r = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            if r and (r.Position - root.Position).Magnitude <= Config.AlertRange then near = true end
+        end
+    end
+    if near and not S.alerted then
+        S.alerted = true
+        Toast("⚠️ Убийца рядом!", 2.5)
+        Beep()
+    elseif not near then
+        S.alerted = false
+    end
+end)
+
+-- ============ БЫСТРЫЙ БЕГ ============
+Task("run", 0.2, function()
+    if not hum then return end
+    if Config.FastRun then
+        if hum.WalkSpeed ~= Config.FastRunSpeed then hum.WalkSpeed = Config.FastRunSpeed end
+    elseif S.runWasOn then
+        hum.WalkSpeed = origSpeed
+    end
+    S.runWasOn = Config.FastRun
+end)
+
+-- ============================================================
+-- SILENT AIM (как в Pulse)
+-- Ты стреляешь — скрипт подменяет камеру в этот момент.
+-- Пуля летит в убийцу, если он внутри FOV круга.
+-- ============================================================
+local silentLock = false
+
+local function FindMurdererTarget()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and IsAlive(plr) and GetRole(plr) == "Murderer" then
+            local c = plr.Character
+            if c then
+                local head = c:FindFirstChild("Head") or c:FindFirstChild("HumanoidRootPart")
+                if head then return plr, head end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function InFOV(worldPos)
+    local vp = Camera.ViewportSize
+    local center = Vector2.new(vp.X / 2, vp.Y / 2)
+    local screen, onScreen = Camera:WorldToViewportPoint(worldPos)
+    if not onScreen then return false end
+    local d = (Vector2.new(screen.X, screen.Y) - center).Magnitude
+    return d <= Config.SilentAimFOV
+end
+
+local function ShootAtMurderer()
+    if silentLock then return end
+    if not char or not Camera then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool or tool.Name ~= "Gun" then return end
+
+    local plr, part = FindMurdererTarget()
+    if not plr or not part then return end
+    if not InFOV(part.Position) then return end
+
+    silentLock = true
+
+    local realCF = Camera.CFrame
+    local aimPos = part.Position
+    if Config.SilentAimPredict then
+        aimPos = aimPos + part.AssemblyLinearVelocity * 0.08
+    end
+
+    -- Подмена камеры → выстрел → возврат. БЕЗ wait между ними.
+    Camera.CFrame = CFrame.new(realCF.Position, aimPos)
+    pcall(function() tool:Activate() end)
+    Camera.CFrame = realCF
+
+    task.wait(0.05)
+    silentLock = false
+end
+
+-- Ловим ТВОЙ выстрел (тап по экрану или ЛКМ)
+Conn(UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if not Config.SilentAim then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool or tool.Name ~= "Gun" then return end
+    task.spawn(ShootAtMurderer)
+end))
+
+-- Авто-выстрел (опционально)
+local lastAuto = 0
+Task("silentaim_auto", 0.05, function()
+    if not Config.SilentAimManual then return end
+    if silentLock then return end
+    if tick() - lastAuto < Config.SilentAimDelay then return end
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool or tool.Name ~= "Gun" then return end
+    local plr, part = FindMurdererTarget()
+    if not plr or not part then return end
+    if not InFOV(part.Position) then return end
+    lastAuto = tick()
+    ShootAtMurderer()
+end)
+
+-- FOV круг на экране
+local fovCircle, fovStroke, fovGui
+local function UpdateFOVCircle()
+    local active = Config.SilentAim or Config.SilentAimManual
+    if not fovGui or not fovGui.Parent then
+        if not active then return end
+        fovGui = New("ScreenGui", {Name = "SakuraFOV", ResetOnSpawn = false, IgnoreGuiInset = true,
+            DisplayOrder = 998}, player:WaitForChild("PlayerGui"))
+        S.guis[#S.guis + 1] = fovGui
+        fovCircle = New("Frame", {AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, 0),
+            Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1, BorderSizePixel = 0}, fovGui)
+        Round(fovCircle, 9999)
+        fovStroke = New("UIStroke", {Thickness = 2, Color = Color3.fromRGB(255, 102, 178)}, fovCircle)
+    end
+    if fovGui then fovGui.Enabled = active end
+    if fovCircle then
+        local size = Config.SilentAimFOV * 2
+        fovCircle.Size = UDim2.new(0, size, 0, size)
+        fovStroke.Color = T().accent
+    end
+end
+Task("fovcircle", 0.1, UpdateFOVCircle)
+UpdateFOVCircle()
+
+-- ============================================================
+-- ИНТЕРФЕЙС
+-- ============================================================
+local function Themed(o, prop, key) S.themed[#S.themed + 1] = {o, prop, key} end
+local function AddRef(owner, fn) S.refreshers[#S.refreshers + 1] = {owner = owner, fn = fn} end
+local function Refresh()
+    for i = #S.refreshers, 1, -1 do
+        local r = S.refreshers[i]
+        if r.owner:IsDescendantOf(game) then pcall(r.fn) else table.remove(S.refreshers, i) end
+    end
+end
+
+local UI = {}
+local function UpdateLogo()
+    local th = T()
+    for _, lg in ipairs({UI.logo, UI.btnLogo}) do
+        if lg and lg.frame.Parent then
+            lg.frame.BackgroundColor3 = th.logoBg
+            lg.text.TextColor3 = th.logoText
+            lg.stroke.Color = th.logoStroke
+        end
+    end
+end
+local function ApplyTheme()
+    local th = T()
+    for i = #S.themed, 1, -1 do
+        local t = S.themed[i]
+        if t[1]:IsDescendantOf(game) then t[1][t[2]] = th[t[3]] else table.remove(S.themed, i) end
+    end
+    if UI.main and UI.main.Parent then
+        UI.main.BackgroundColor3 = th.bg
+        UI.main.BackgroundTransparency = Config.MenuAlpha
+    end
+    UpdateLogo()
+    Refresh()
+end
+
+local function Splash()
+    pcall(function()
+        local th = T()
+        local g = New("ScreenGui", {Name = "SakuraMobileSplash", ResetOnSpawn = false, IgnoreGuiInset = true,
+            DisplayOrder = 2000}, player:WaitForChild("PlayerGui"))
+        S.guis[#S.guis + 1] = g
+        local bg = New("CanvasGroup", {Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = th.bg, BorderSizePixel = 0,
+            GroupTransparency = 1}, g)
+        local glow = New("Frame", {AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, -40),
+            Size = UDim2.new(0, 200, 0, 200), BackgroundColor3 = th.accent, BackgroundTransparency = 0.86, BorderSizePixel = 0}, bg)
+        Round(glow, 100)
+        TS:Create(glow, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+            {Size = UDim2.new(0, 250, 0, 250), BackgroundTransparency = 0.94}):Play()
+        local ring = New("Frame", {AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, -40),
+            Size = UDim2.new(0, 112, 0, 112), BackgroundTransparency = 1, BorderSizePixel = 0}, bg)
+        Round(ring, 56)
+        local rs = New("UIStroke", {Thickness = 4, Color = th.accent}, ring)
+        local rg = New("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0),
+            NumberSequenceKeypoint.new(0.4, 0.15), NumberSequenceKeypoint.new(0.55, 1), NumberSequenceKeypoint.new(1, 1)})}, rs)
+        TS:Create(rg, TweenInfo.new(1.1, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {Rotation = 360}):Play()
+        local logo = New("Frame", {AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, -40),
+            Size = UDim2.new(0, 76, 0, 76), BackgroundColor3 = th.logoBg, BorderSizePixel = 0}, bg)
+        Round(logo, 20)
+        New("UIStroke", {Thickness = 2, Color = th.logoStroke}, logo)
+        New("TextLabel", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "Sak", TextSize = 30,
+            Font = Enum.Font.GothamBlack, TextColor3 = th.logoText}, logo)
+        local sc = New("UIScale", {Scale = 0.5}, logo)
+        TS:Create(sc, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+        New("TextLabel", {AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, 40), Size = UDim2.new(0, 300, 0, 30),
+            BackgroundTransparency = 1, Text = "SAKURA MOBILE", TextSize = 24, Font = Enum.Font.GothamBlack,
+            TextColor3 = th.accent}, bg)
+        New("TextLabel", {AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, 64), Size = UDim2.new(0, 300, 0, 14),
+            BackgroundTransparency = 1, Text = "Murder Mystery 2 · версия " .. VERSION, TextSize = 11,
+            Font = Enum.Font.Gotham, TextColor3 = Color3.fromRGB(205, 190, 230)}, bg)
+        local barBg = New("Frame", {AnchorPoint = Vector2.new(.5, .5), Position = UDim2.new(.5, 0, .5, 92),
+            Size = UDim2.new(0, 220, 0, 8), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.9,
+            BorderSizePixel = 0}, bg)
+        Round(barBg, 4)
+        local fill = New("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = th.accent, BorderSizePixel = 0}, barBg)
+        Round(fill, 4)
+        TS:Create(bg, TweenInfo.new(0.3), {GroupTransparency = 0}):Play()
+        TS:Create(fill, TweenInfo.new(1.8, Enum.EasingStyle.Quad), {Size = UDim2.new(1, 0, 1, 0)}):Play()
+        task.wait(2.1)
+        TS:Create(sc, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.In), {Scale = 1.4}):Play()
+        local tw = TS:Create(bg, TweenInfo.new(0.4), {GroupTransparency = 1})
+        tw:Play()
+        tw.Completed:Wait()
+        g:Destroy()
+    end)
+end
+Splash()
+
+local PlayerGui = player:WaitForChild("PlayerGui")
+local vp = Camera.ViewportSize
+if vp.X < 100 then vp = Vector2.new(800, 600) end
+local W = math.min(360, vp.X - 16)
+local H = math.min(500, vp.Y - 30)
+
+UI.gui = New("ScreenGui", {Name = "SakuraMobile", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 999}, PlayerGui)
+S.guis[#S.guis + 1] = UI.gui
+
+local main = New("Frame", {Name = "Main", Size = UDim2.new(0, W, 0, H), AnchorPoint = Vector2.new(.5, .5),
+    Position = UDim2.new(.5, 0, .5, 0), BackgroundColor3 = T().bg, BackgroundTransparency = Config.MenuAlpha,
+    BorderSizePixel = 0, ClipsDescendants = true}, UI.gui)
+UI.main = main
+Round(main, 18)
+New("UIGradient", {Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(150, 150, 165)), Rotation = 90}, main)
+local mainScale = New("UIScale", {Scale = 0.85 * Config.MenuScale}, main)
+local mainStroke = New("UIStroke", {Thickness = 2, Transparency = 0.1}, main)
+Themed(mainStroke, "Color", "accent")
+local strokeGrad = New("UIGradient", {Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.new(1, 1, 1)),
+    ColorSequenceKeypoint.new(0.5, Color3.new(.4, .4, .5)), ColorSequenceKeypoint.new(1, Color3.new(1, 1, 1))})}, mainStroke)
+TS:Create(strokeGrad, TweenInfo.new(6, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {Rotation = 360}):Play()
+
+local function StartFX()
+    UI.fxToken = (UI.fxToken or 0) + 1
+    local my = UI.fxToken
+    local old = main:FindFirstChild("SakuraFX")
+    if old then old:Destroy() end
+    if not Config.MenuFX then return end
+    local box = New("Frame", {Name = "SakuraFX", Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+        ZIndex = 0, ClipsDescendants = true}, main)
+    local rng = Random.new(5)
+    if Config.Mode == "space" then
+        for i = 1, 45 do
+            local size = rng:NextInteger(1, 3)
+            local star = New("Frame", {Size = UDim2.new(0, size, 0, size),
+                Position = UDim2.new(rng:NextNumber(), 0, rng:NextNumber(), 0),
+                BackgroundColor3 = (i % 4 == 0) and Color3.fromRGB(190, 150, 255) or Color3.new(1, 1, 1),
+                BackgroundTransparency = rng:NextNumber(0.1, 0.5), BorderSizePixel = 0, ZIndex = 0}, box)
+            Round(star, 2)
+            if i % 3 == 0 then
+                TS:Create(star, TweenInfo.new(rng:NextNumber(1.2, 2.8), Enum.EasingStyle.Sine,
+                    Enum.EasingDirection.InOut, -1, true), {BackgroundTransparency = 0.95}):Play()
+            end
+        end
+    end
+    task.spawn(function()
+        local r2 = Random.new()
+        while UI.fxToken == my and Running and box.Parent do
+            if not main.Visible then
+                task.wait(0.5)
+            elseif Config.Mode == "space" then
+                local sx, sy = r2:NextNumber(0.3, 1), r2:NextNumber(-0.1, 0.4)
+                local line = New("Frame", {Size = UDim2.new(0, 60, 0, 2), Position = UDim2.new(sx, 0, sy, 0),
+                    BackgroundColor3 = Color3.fromRGB(210, 180, 255), BorderSizePixel = 0, Rotation = 35, ZIndex = 0}, box)
+                local tw = TS:Create(line, TweenInfo.new(0.9, Enum.EasingStyle.Quad),
+                    {Position = UDim2.new(sx - 0.5, 0, sy + 0.6, 0), BackgroundTransparency = 1})
+                tw:Play()
+                tw.Completed:Connect(function() line:Destroy() end)
+                task.wait(r2:NextNumber(2.5, 5))
+            else
+                local px = r2:NextNumber()
+                local petal = New("TextLabel", {BackgroundTransparency = 1, Text = "🌸", TextSize = r2:NextInteger(10, 18),
+                    TextTransparency = 0.45, Size = UDim2.new(0, 20, 0, 20), Position = UDim2.new(px, 0, 0, -20),
+                    Rotation = r2:NextInteger(0, 360), ZIndex = 0}, box)
+                local tw = TS:Create(petal, TweenInfo.new(r2:NextNumber(5, 8), Enum.EasingStyle.Sine),
+                    {Position = UDim2.new(px + r2:NextNumber(-0.15, 0.15), 0, 1, 20), Rotation = r2:NextInteger(0, 360)})
+                tw:Play()
+                tw.Completed:Connect(function() petal:Destroy() end)
+                task.wait(r2:NextNumber(0.9, 1.6))
+            end
+        end
+    end)
+end
+
+local title = New("Frame", {Size = UDim2.new(1, 0, 0, 48), BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 2}, main)
+Themed(title, "BackgroundColor3", "accent")
+Round(title, 18)
+New("UIGradient", {Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(150, 150, 170))}, title)
+
+local logoFrame = New("Frame", {Size = UDim2.new(0, 36, 0, 36), Position = UDim2.new(0, 10, 0, 6), BorderSizePixel = 0, ZIndex = 3}, title)
+Round(logoFrame, 10)
+local logoStroke = New("UIStroke", {Thickness = 1.5}, logoFrame)
+local logoText = New("TextLabel", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "Sak", TextSize = 15,
+    Font = Enum.Font.GothamBlack, ZIndex = 4}, logoFrame)
+UI.logo = {frame = logoFrame, text = logoText, stroke = logoStroke}
+
+New("TextLabel", {Size = UDim2.new(1, -150, 0, 24), Position = UDim2.new(0, 54, 0, 5), BackgroundTransparency = 1,
+    Text = "SAKURA MOBILE", TextColor3 = Color3.new(1, 1, 1), TextSize = 16, Font = Enum.Font.GothamBlack,
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3}, title)
+local subLbl = New("TextLabel", {Size = UDim2.new(1, -150, 0, 14), Position = UDim2.new(0, 54, 0, 29), BackgroundTransparency = 1,
+    Text = "MM2 · V" .. VERSION, TextColor3 = Color3.fromRGB(240, 230, 250), TextTransparency = 0.15, TextSize = 10,
+    Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3}, title)
+
+local function HeadBtn(text, xOff, color)
+    local b = New("TextButton", {Size = UDim2.new(0, 30, 0, 30), AnchorPoint = Vector2.new(.5, .5),
+        Position = UDim2.new(1, xOff, 0.5, 0), BackgroundColor3 = color, Text = text, TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 14, Font = Enum.Font.GothamBold, BorderSizePixel = 0, AutoButtonColor = true, ZIndex = 4}, title)
+    Round(b, 8)
+    return b
+end
+local minBtn = HeadBtn("▼", -52, Color3.fromRGB(60, 140, 255))
+local closeBtn = HeadBtn("✕", -18, Color3.fromRGB(255, 70, 100))
+
+do
+    local dragging, startInput, startPos = false, nil, nil
+    title.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging, startInput, startPos = true, i.Position, main.Position
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    Conn(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseMovement) then
+            local d = i.Position - startInput
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end))
+end
+
+local TABS = {
+    {"esp", "🎭", "ESP РОЛЕЙ"}, {"move", "⚡", "БЕГ"}, {"gun", "🔫", "ПИСТОЛЕТ"}, {"info", "📊", "ИНФО"}, {"set", "⚙️", "НАСТРОЙКИ"},
+}
+local tabBar = New("Frame", {Size = UDim2.new(1, -16, 0, 36), Position = UDim2.new(0, 8, 0, 54), BackgroundTransparency = 1, ZIndex = 2}, main)
+local area = New("Frame", {Size = UDim2.new(1, -12, 1, -100), Position = UDim2.new(0, 6, 0, 94), BackgroundTransparency = 1,
+    ClipsDescendants = true, ZIndex = 2}, main)
+
+local ordCount = {}
+local function Ord(page)
+    ordCount[page] = (ordCount[page] or 0) + 1
+    return ordCount[page]
+end
+
+local function Page(id)
+    local sf = New("ScrollingFrame", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, ScrollBarThickness = 3,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false, ZIndex = 2,
+        BorderSizePixel = 0}, area)
+    Themed(sf, "ScrollBarImageColor3", "accent")
+    New("UIListLayout", {Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder}, sf)
+    New("UIPadding", {PaddingBottom = UDim.new(0, 10), PaddingRight = UDim.new(0, 6)}, sf)
+    UI.pages = UI.pages or {}
+    UI.pages[id] = sf
+    return sf
+end
+
+local CARD = Color3.fromRGB(30, 15, 46)
+
+local function Press(btn, base)
+    btn.MouseButton1Down:Connect(function() TS:Create(btn, TweenInfo.new(0.1), {BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.18)}):Play() end)
+    local function up() TS:Create(btn, TweenInfo.new(0.2), {BackgroundColor3 = base}):Play() end
+    btn.MouseButton1Up:Connect(up)
+    btn.MouseLeave:Connect(up)
+end
+
+local function Header(page, text)
+    local l = New("TextLabel", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Text = text, TextSize = 13,
+        Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = Ord(page), ZIndex = 2}, page)
+    Themed(l, "TextColor3", "accent")
+    local line = New("Frame", {Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -2), BackgroundTransparency = 0.55,
+        BorderSizePixel = 0, ZIndex = 2}, l)
+    Themed(line, "BackgroundColor3", "accent")
+    return l
+end
+
+local function Note(page, text)
+    return New("TextLabel", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        Text = text, TextWrapped = true, TextColor3 = Color3.fromRGB(190, 175, 215), TextSize = 11, Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = Ord(page), ZIndex = 2}, page)
+end
+
+local function Toggle(page, label, key, desc, onChange)
+    local h = desc and 54 or 44
+    local btn = New("TextButton", {Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = CARD, Text = "", AutoButtonColor = false,
+        BorderSizePixel = 0, LayoutOrder = Ord(page), ZIndex = 2}, page)
+    Round(btn, 11)
+    Press(btn, CARD)
+    local cardStroke = New("UIStroke", {Thickness = 1.5, Transparency = 1}, btn)
+    Themed(cardStroke, "Color", "accent")
+    New("TextLabel", {Size = UDim2.new(1, -64, 0, desc and 22 or h), Position = UDim2.new(0, 12, 0, desc and 7 or 0),
+        BackgroundTransparency = 1, Text = label, TextColor3 = Color3.new(1, 1, 1), TextSize = 13, Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3}, btn)
+    if desc then
+        New("TextLabel", {Size = UDim2.new(1, -64, 0, 20), Position = UDim2.new(0, 12, 0, 28), BackgroundTransparency = 1,
+            Text = desc, TextColor3 = Color3.fromRGB(165, 150, 190), TextSize = 10, Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 3}, btn)
+    end
+    local track = New("Frame", {Size = UDim2.new(0, 42, 0, 22), Position = UDim2.new(1, -52, 0.5, -11),
+        BackgroundColor3 = Color3.fromRGB(80, 80, 92), BorderSizePixel = 0, ZIndex = 3}, btn)
+    Round(track, 11)
+    local knob = New("Frame", {Size = UDim2.new(0, 18, 0, 18), Position = UDim2.new(0, 2, 0.5, -9),
+        BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 4}, track)
+    Round(knob, 9)
+    local last
+    AddRef(btn, function()
+        local on = Config[key] and true or false
+        track.BackgroundColor3 = on and T().accent or Color3.fromRGB(80, 80, 92)
+        cardStroke.Transparency = on and 0.35 or 1
+        if on ~= last then
+            local goal = {Position = on and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}
+            if last == nil then knob.Position = goal.Position
+            else TS:Create(knob, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out), goal):Play() end
+            last = on
+        end
+    end)
+    btn.MouseButton1Click:Connect(function()
+        Config[key] = not Config[key]
+        Refresh()
+        if onChange then pcall(onChange, Config[key]) end
+        MarkDirty()
+    end)
+    Refresh()
+    return btn
+end
+
+local function Slider(page, label, key, min, max, fmt, onChange)
+    fmt = fmt or function(v) return tostring(math.floor(v + 0.5)) end
+    local holder = New("Frame", {Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = CARD, BorderSizePixel = 0,
+        LayoutOrder = Ord(page), ZIndex = 2}, page)
+    Round(holder, 11)
+    local lbl = New("TextLabel", {Size = UDim2.new(1, -20, 0, 20), Position = UDim2.new(0, 12, 0, 6), BackgroundTransparency = 1,
+        TextColor3 = Color3.new(1, 1, 1), TextSize = 12, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 3}, holder)
+    local bar = New("Frame", {Position = UDim2.new(0, 14, 0, 34), Size = UDim2.new(1, -28, 0, 8), BackgroundColor3 = Color3.fromRGB(60, 40, 82),
+        BorderSizePixel = 0, Active = true, ZIndex = 3}, holder)
+    Round(bar, 4)
+    local fill = New("Frame", {Size = UDim2.new(0, 0, 1, 0), BorderSizePixel = 0, ZIndex = 3}, bar)
+    Round(fill, 4)
+    Themed(fill, "BackgroundColor3", "accent")
+    local knob = New("Frame", {AnchorPoint = Vector2.new(.5, .5), Size = UDim2.new(0, 20, 0, 20), Position = UDim2.new(0, 0, 0.5, 0),
+        BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 4}, bar)
+    Round(knob, 10)
+    local function render()
+        local v = Config[key]
+        local a = math.clamp((v - min) / (max - min), 0, 1)
+        fill.Size = UDim2.new(a, 0, 1, 0)
+        knob.Position = UDim2.new(a, 0, 0.5, 0)
+        lbl.Text = label .. ": " .. fmt(v)
+    end
+    AddRef(holder, render)
+    local function setFromX(x)
+        local a = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        Config[key] = min + (max - min) * a
+        render()
+        if onChange then pcall(onChange, Config[key]) end
+    end
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then
+            S.activeSlider = setFromX
+            S.activeScroll = bar:FindFirstAncestorOfClass("ScrollingFrame")
+            if S.activeScroll then S.activeScroll.ScrollingEnabled = false end
+            setFromX(i.Position.X)
+        end
+    end)
+    render()
+    return holder
+end
+
+Conn(UIS.InputChanged:Connect(function(i)
+    if S.activeSlider and (i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseMovement) then
+        S.activeSlider(i.Position.X)
+    end
+end))
+Conn(UIS.InputEnded:Connect(function(i)
+    if S.activeSlider and (i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1) then
+        S.activeSlider = nil
+        if S.activeScroll then S.activeScroll.ScrollingEnabled = true S.activeScroll = nil end
+        MarkDirty()
+    end
+end))
+
+local function Btn(page, text, fn)
+    local b = New("TextButton", {Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 0.25, Text = text,
+        TextColor3 = Color3.new(1, 1, 1), TextSize = 13, Font = Enum.Font.GothamBold, BorderSizePixel = 0,
+        AutoButtonColor = false, LayoutOrder = Ord(page), ZIndex = 2}, page)
+    Round(b, 11)
+    Themed(b, "BackgroundColor3", "accent")
+    b.MouseButton1Down:Connect(function() TS:Create(b, TweenInfo.new(0.1), {BackgroundTransparency = 0.05}):Play() end)
+    local function up() TS:Create(b, TweenInfo.new(0.2), {BackgroundTransparency = 0.25}):Play() end
+    b.MouseButton1Up:Connect(up)
+    b.MouseLeave:Connect(up)
+    b.MouseButton1Click:Connect(function() pcall(fn) end)
+    return b
+end
+
+local function Row2(page, textA, fnA, textB, fnB, isActiveA)
+    local row = New("Frame", {Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, LayoutOrder = Ord(page), ZIndex = 2}, page)
+    local function mk(text, x, fn)
+        local b = New("TextButton", {Size = UDim2.new(0.5, -4, 1, 0), Position = UDim2.new(x, x == 0 and 0 or 4, 0, 0),
+            Text = text, TextColor3 = Color3.new(1, 1, 1), TextSize = 13, Font = Enum.Font.GothamBold, BorderSizePixel = 0,
+            AutoButtonColor = false, ZIndex = 2}, row)
+        Round(b, 11)
+        Themed(b, "BackgroundColor3", "accent")
+        b.MouseButton1Click:Connect(function() pcall(fn) end)
+        return b
+    end
+    local a = mk(textA, 0, fnA)
+    local b = mk(textB, 0.5, fnB)
+    if isActiveA then
+        AddRef(row, function()
+            local first = isActiveA()
+            a.BackgroundTransparency = first and 0.05 or 0.65
+            b.BackgroundTransparency = first and 0.65 or 0.05
+        end)
+    end
+    Refresh()
+    return row
+end
+
+local tabBtns = {}
+local function SwitchTab(id)
+    UI.currentTab = id
+    for pid, pg in pairs(UI.pages) do pg.Visible = (pid == id) end
+    for _, tb in ipairs(tabBtns) do tb.btn.BackgroundTransparency = (tb.id == id) and 0.05 or 0.72 end
+    for _, t in ipairs(TABS) do
+        if t[1] == id then subLbl.Text = "MM2 · V" .. VERSION .. " · " .. t[3] end
+    end
+    local pg = UI.pages[id]
+    if pg then
+        pg.Position = UDim2.new(0, 0, 0, 16)
+        TS:Create(pg, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = UDim2.new(0, 0, 0, 0)}):Play()
+    end
+end
+
+for i, t in ipairs(TABS) do
+    local b = New("TextButton", {Size = UDim2.new(1 / #TABS, -5, 1, 0), Position = UDim2.new((i - 1) / #TABS, 2, 0, 0),
+        Text = t[2], TextSize = 18, Font = Enum.Font.GothamBold, TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+        AutoButtonColor = false, ZIndex = 3}, tabBar)
+    Round(b, 10)
+    Themed(b, "BackgroundColor3", "accent")
+    tabBtns[#tabBtns + 1] = {id = t[1], btn = b}
+    b.MouseButton1Click:Connect(function() SwitchTab(t[1]) end)
+end
+
+-- Вкладки
+local pEsp = Page("esp")
+Header(pEsp, "🎭 ESP РОЛЕЙ")
+Toggle(pEsp, "ESP ролей", "RoleESP", "🔴 убийца · 🔵 шериф · 🟢 мирный")
+Toggle(pEsp, "Точные роли (через игру)", "PreciseRoles", "Читает роли у самой игры, видно до первого удара")
+Toggle(pEsp, "Показывать имя", "ShowName")
+Toggle(pEsp, "Показывать дистанцию", "ShowDistance")
+Toggle(pEsp, "Скрывать мирных", "HideInnocent", "Остаются только убийца и шериф")
+Header(pEsp, "🔫 ПИСТОЛЕТ И ЛИНИИ")
+Toggle(pEsp, "ESP пистолета", "GunESP", "Подсветка упавшего пистолета с расстоянием")
+Toggle(pEsp, "Линии до убийцы, шерифа и пистолета", "ESPLines")
+Header(pEsp, "⚠️ ПРЕДУПРЕЖДЕНИЕ")
+Toggle(pEsp, "Убийца рядом", "MurdererAlert", "Звук и уведомление, когда убийца подходит")
+Slider(pEsp, "Дистанция предупреждения", "AlertRange", 10, 120)
+
+local pMove = Page("move")
+Header(pMove, "⚡ БЫСТРЫЙ БЕГ")
+Toggle(pMove, "Быстрый бег", "FastRun", "Скорость держится даже после респавна", function(on)
+    if not on and hum then hum.WalkSpeed = origSpeed end
+end)
+Slider(pMove, "Скорость", "FastRunSpeed", 16, 120)
+Note(pMove, "💡 В MM2 при слишком большой скорости сервер может откатывать назад. Лучше держать 25–40.")
+
+local pGun = Page("gun")
+Header(pGun, "🎯 SILENT AIM — ПУЛИ В УБИЙЦУ")
+Note(pGun, "Ты сам стреляешь. Если убийца внутри FOV круга — пуля летит в него, даже если ты смотришь в сторону.")
+Toggle(pGun, "Silent aim", "SilentAim", "Пули летят в убийцу при твоём выстреле")
+Toggle(pGun, "Авто-выстрел", "SilentAimManual", "Скрипт сам жмёт выстрел, когда убийца в FOV")
+Toggle(pGun, "Упреждение по движению", "SilentAimPredict")
+Slider(pGun, "FOV (радиус круга)", "SilentAimFOV", 50, 600)
+Slider(pGun, "Задержка авто-выстрела (сек)", "SilentAimDelay", 0.05, 1.0, function(v) return string.format("%.2f", v) end)
+
+Header(pGun, "🖐 АВТО-ПОДБОР ПИСТОЛЕТА")
+Toggle(pGun, "Авто-подбор пистолета", "AutoGrab")
+Toggle(pGun, "Телепорт, если касание не сработало", "GrabTeleport")
+Toggle(pGun, "Вернуться на место после подбора", "GrabReturn")
+Toggle(pGun, "Не брать, если я убийца", "GrabSkipMurderer")
+Toggle(pGun, "Уведомление о подборе", "GrabNotify")
+Slider(pGun, "Макс. дистанция (0 = любая)", "GrabRange", 0, 400)
+Btn(pGun, "🔫 Подобрать пистолет сейчас", function()
+    local drop = FindGunDrop()
+    if drop and drop.Parent then GrabGun(drop, true) else Toast("Пистолета на карте нет") end
+end)
+
+local pInfo = Page("info")
+Header(pInfo, "📊 СОСТОЯНИЕ РАУНДА")
+local function InfoCard(page)
+    local l = New("TextLabel", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = CARD,
+        Text = "—", TextWrapped = true, TextColor3 = Color3.new(1, 1, 1), TextSize = 13, Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, BorderSizePixel = 0,
+        LayoutOrder = Ord(page), ZIndex = 2}, page)
+    Round(l, 11)
+    New("UIPadding", {PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), PaddingTop = UDim.new(0, 10),
+        PaddingBottom = UDim.new(0, 10)}, l)
+    return l
+end
+UI.infoRoles = InfoCard(pInfo)
+UI.infoGun = InfoCard(pInfo)
+UI.infoMe = InfoCard(pInfo)
+Btn(pInfo, "📋 Скопировать ник убийцы", function()
+    if UI.murderer and setclipboard then
+        setclipboard(UI.murderer.Name)
+        Toast("📋 Скопировано: " .. UI.murderer.Name)
+    else
+        Toast("Убийца не найден")
+    end
+end)
+
+Task("info", 0.5, function()
+    if not UI.infoRoles or not UI.infoRoles.Parent or not UI.pages.info.Visible then return end
+    local mur, she, alive, total = nil, nil, 0, 0
+    for _, plr in ipairs(Players:GetPlayers()) do
+        total = total + 1
+        if IsAlive(plr) then alive = alive + 1 end
+        local r = GetRole(plr)
+        if r == "Murderer" then mur = plr elseif r == "Sheriff" then she = plr end
+    end
+    UI.murderer = mur
+    local function fmt(plr)
+        if not plr then return "не найден" end
+        return plr.Name .. (IsAlive(plr) and "" or " (мёртв)")
+    end
+    UI.infoRoles.Text = "🔪 Убийца: " .. fmt(mur) .. "\n🔫 Шериф: " .. fmt(she) ..
+        "\n👥 Живых: " .. alive .. " из " .. total
+    local drop = FindGunDrop()
+    if drop and drop.Parent then
+        local d = root and math.floor((drop.Position - root.Position).Magnitude) or 0
+        UI.infoGun.Text = "🔫 Пистолет лежит на карте\n📏 До него: " .. d .. " м"
+    elseif HasGun() then
+        UI.infoGun.Text = "🔫 Пистолет у тебя в инвентаре"
+    else
+        UI.infoGun.Text = "🔫 Пистолет не упал"
+    end
+    UI.infoMe.Text = "🧍 Твоя роль: " .. (ROLE_RU[MyRole()] or "—") ..
+        "\n🛰 Роли через игру: " .. (S.remoteOK and "работает" or "недоступно (определяю по предметам)")
+end)
+
+local pSet = Page("set")
+local function SetMode(mode)
+    Config.Mode = mode
+    ApplyTheme()
+    StartFX()
+    MarkDirty()
+    Toast(mode == "space" and "🌌 Режим Space" or "🌸 Режим Sakura")
+end
+Header(pSet, "🌌 РЕЖИМ МЕНЮ")
+Row2(pSet, "🌌 Space", function() SetMode("space") end, "🌸 Sakura", function() SetMode("sakura") end,
+    function() return Config.Mode == "space" end)
+Header(pSet, "🪟 ОКНО")
+Row2(pSet, "Компакт", function()
+    Config.MenuScale = 0.8 TS:Create(mainScale, TweenInfo.new(0.2), {Scale = 0.8}):Play() MarkDirty()
+end, "Крупно", function()
+    Config.MenuScale = 1.1 TS:Create(mainScale, TweenInfo.new(0.2), {Scale = 1.1}):Play() MarkDirty()
+end)
+Slider(pSet, "Прозрачность окна", "MenuAlpha", 0, 0.6, function(v) return string.format("%.2f", v) end, function()
+    main.BackgroundTransparency = Config.MenuAlpha
+end)
+Toggle(pSet, "Частицы в меню", "MenuFX", "Лепестки (Sakura) или звёзды (Space)", function() StartFX() end)
+Header(pSet, "💾 СОХРАНЕНИЕ")
+Btn(pSet, "💾 Сохранить настройки", function()
+    Save()
+    Toast(canFile and "💾 Сохранено" or "Файлы не поддерживаются")
+end)
+Btn(pSet, "♻️ Сбросить настройки", function()
+    for k, v in pairs(DEFAULTS) do Config[k] = v end
+    ApplyTheme()
+    StartFX()
+    TS:Create(mainScale, TweenInfo.new(0.2), {Scale = Config.MenuScale}):Play()
+    if hum then hum.WalkSpeed = origSpeed end
+    Refresh()
+    MarkDirty()
+    Toast("♻️ Настройки сброшены")
+end)
+Header(pSet, "⏏ ВЫГРУЗКА")
+local Unload
+Btn(pSet, "⏏ Выгрузить скрипт (End)", function() Unload() end)
+Note(pSet, "SAKURA MOBILE V" .. VERSION .. " · Murder Mystery 2.")
+
+local collapsed = false
+minBtn.MouseButton1Click:Connect(function()
+    collapsed = not collapsed
+    local newH = collapsed and 48 or H
+    local curH = main.Size.Y.Offset
+    local pos = main.Position
+    TS:Create(main, TweenInfo.new(0.25, Enum.EasingStyle.Quad), {Size = UDim2.new(0, W, 0, newH),
+        Position = UDim2.new(pos.X.Scale, pos.X.Offset, pos.Y.Scale, pos.Y.Offset + (newH - curH) / 2)}):Play()
+    minBtn.Text = collapsed and "▲" or "▼"
+end)
+
+Unload = function()
+    if not Running then return end
+    Running = false
+    Save()
+    S.tasks = {}
+    for _, c in ipairs(S.conns) do pcall(function() c:Disconnect() end) end
+    ClearESP()
+    if hum then pcall(function() hum.WalkSpeed = origSpeed end) end
+    for _, g in ipairs(S.guis) do pcall(function() g:Destroy() end) end
+    env.SakuraMobileUnload = nil
+    print("🌸 SAKURA MOBILE выгружена")
+end
+closeBtn.MouseButton1Click:Connect(Unload)
+env.SakuraMobileUnload = Unload
+
+local function ToggleMenu()
+    main.Visible = not main.Visible
+    if main.Visible then
+        mainScale.Scale = 0.88 * Config.MenuScale
+        TS:Create(mainScale, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = Config.MenuScale}):Play()
+    end
+end
+
+do
+    local g = New("ScreenGui", {Name = "SakuraMobileBtn", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 998}, PlayerGui)
+    S.guis[#S.guis + 1] = g
+    local btn = New("TextButton", {Size = UDim2.new(0, 46, 0, 46), AnchorPoint = Vector2.new(.5, .5),
+        Position = UDim2.new(0, 38, 0, 110), Text = "Sak", TextSize = 16, Font = Enum.Font.GothamBlack, AutoButtonColor = false,
+        BorderSizePixel = 0}, g)
+    Round(btn, 12)
+    local st = New("UIStroke", {Thickness = 1.5}, btn)
+    local sc = New("UIScale", {Scale = 1}, btn)
+    UI.btnLogo = {frame = btn, text = btn, stroke = st}
+    local dragging, moved, startInput, startPos = false, false, nil, nil
+    btn.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging, moved, startInput, startPos = true, false, i.Position, btn.Position
+            TS:Create(sc, TweenInfo.new(0.1), {Scale = 0.9}):Play()
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    TS:Create(sc, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+                    if not moved then ToggleMenu() end
+                end
+            end)
+        end
+    end)
+    Conn(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseMovement) then
+            local d = i.Position - startInput
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                local v = Camera.ViewportSize
+                btn.Position = UDim2.new(0, math.clamp(startPos.X.Offset + d.X, 24, v.X - 24),
+                    0, math.clamp(startPos.Y.Offset + d.Y, 24, v.Y - 24))
+            end
+        end
+    end))
+end
+
+Conn(UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then ToggleMenu()
+    elseif input.KeyCode == Enum.KeyCode.End then Unload() end
+end))
+
+ApplyTheme()
+StartFX()
+SwitchTab("esp")
+TS:Create(mainScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = Config.MenuScale}):Play()
+Refresh()
+
+print("🌸 SAKURA MOBILE V" .. VERSION .. " ЗАГРУЖЕНА")
+Toast("🌸 SAKURA MOBILE V" .. VERSION .. " загружена", 2.5)
